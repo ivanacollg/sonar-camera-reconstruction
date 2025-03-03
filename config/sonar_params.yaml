@@ -4,6 +4,12 @@ transformation: -0.087
 verticalAperture: 20.0
 sonarRange: 3.0
 
+#define which implmentation we want to match the features
+#method: python # options are cpp or python
+
+#do we want to see the feature images from CFAR? turn on to publish
+#visFeatures: True
+
 #define the matching paramters
 uncertaintyMax: .97
 patchSize: 6
@@ -35,6 +41,9 @@ visualization:
   coordinates: 'cartesian'
   radius: 2
   color: [0, 165, 255]
+
+# Publish sonar feature image -> computationally expensive
+sonar_features: True
 
 # are we using compressed imagary
 compressed_images: True

@@ -3,6 +3,7 @@ import numpy as np
 from scipy.interpolate import interp1d
 import threading
 import warnings
+#from line_profiler import LineProfiler
 
 # OpenCV
 import cv2
@@ -30,7 +31,7 @@ class MergeFunctions:
         xyz_aggregated (np.ndarray): Stores the aggregated 3D point cloud data.
         lock (threading.RLock): Lock for handling concurrency.
     """
-    def __init__(self, Ts_c, minpixnum, threshold_inv):
+    def __init__(self, Ts_c, minpixnum, threshold_inv, boundry):
         """
         Initializes the MergeFunctions class.
 
@@ -38,9 +39,11 @@ class MergeFunctions:
             Ts_c (np.ndarray): Transformation matrix from sonar to camera frame.
             minpixnum (int): Minimum number of pixels for valid segmentation.
             threshold_inv (int): Threshold for image preprocessing.
+            boundry (int): Boundry image threshold
         """
-        # conar to camera transfromation
-        self.Ts_c = Ts_c
+        # sonar to camera transfromation
+        self.translation = Ts_c[:3, 3]
+        self.rotation = Ts_c[:3,:3]
         # Initialize sensor information
         self.sonar_msg = None
         self.pose = None
@@ -48,6 +51,7 @@ class MergeFunctions:
 
         self.minpixnum=minpixnum
         self.threshold_inv = threshold_inv
+        self.boundry = boundry
 
         self.color_map = np.array([
                     [1.0, 0.0, 0.0],
@@ -70,8 +74,9 @@ class MergeFunctions:
                 
         self.xyz_aggregated = np.zeros(0)
         # the threading lock
-        self.lock = threading.RLock()
+        self.lock = threading.Lock()
 
+    
     def set_camera_params(self, K, D, rgb_width, rgb_height):
         """
         Sets camera parameters.
@@ -84,7 +89,7 @@ class MergeFunctions:
         """
         self.monocular_camera = MonocularCamera(K, D, rgb_width, rgb_height)
     
-    def set_sonar_params(self, sonar_range, detector_threshold, vertical_FOV):
+    def set_sonar_params(self, sonar_range, detector_threshold, vertical_FOV, sonar_features, fast_performance):
         """
         Sets sonar parameters.
 
@@ -92,8 +97,12 @@ class MergeFunctions:
             sonar_range (float): Maximum range of the sonar.
             detector_threshold (float): Detection threshold for sonar processing.
             vertical_FOV (float): Vertical field of view of the sonar.
+            sonar_features (bool): Determines if sonar features are highlited n the image.
+            fast_performance (bool): Determines if fast or detailed perfomanc paramterers are used.
         """
-        self.imaging_sonar = ImagingSonar(sonar_range, detector_threshold, vertical_FOV)
+        self.imaging_sonar = ImagingSonar(sonar_range, detector_threshold, vertical_FOV, sonar_features, fast_performance)
+        #self.lp = LineProfiler()
+        #self.lp.add_function(self.imaging_sonar.get_sonar_scanline)
 
     def init_CFAR(self, Ntc, Ngc, Pfa, rank):
         """
@@ -107,6 +116,7 @@ class MergeFunctions:
         """
         self.imaging_sonar.init_CFAR(Ntc, Ngc, Pfa, rank)
 
+    '''
     def set_sensor_info(self, image, pose, sonar_msg):
         """
         Updates sensor information.
@@ -116,11 +126,11 @@ class MergeFunctions:
             pose (object): Pose information of the robot.
             sonar_msg (object): Sonar message data.
         """
-        self.lock.acquire()
-        self.image= image
-        self.pose = pose
-        self.sonar_msg = sonar_msg
-        self.lock.release()
+        with self.lock:
+            self.image= image
+            self.pose = pose
+            self.sonar_msg = sonar_msg
+    '''
 
     def rotate_cloud(self, t, R, new_cloud):
         """
@@ -152,7 +162,7 @@ class MergeFunctions:
         return xyzw_map[:, 0:3]
 
 
-    def merge_data(self):
+    def merge_data(self, image, pose, sonar_msg):
         """
         Merges sonar and camera data to generate a 3D point cloud.
 
@@ -163,18 +173,20 @@ class MergeFunctions:
                 - object: Timestamp of the sonar message.
                 - np.ndarray: Feature image from sonar processing.
         """
-        self.lock.acquire()
-        sonar_msg = self.sonar_msg
-        image = self.image
-        pose = self.pose
-        self.lock.release()
+        #with self.lock:
+        #    sonar_msg = self.sonar_msg
+        #    image = self.image
+        #    pose = self.pose
+
         if sonar_msg is not None and image is not None and pose is not None:
             stamp = sonar_msg.header.stamp
+            #self.lp.enable()
             # Get filtered sonar scanline features
             scan_line, feature_image = self.imaging_sonar.get_sonar_scanline(sonar_msg)
+            #self.lp.disable()
+            #self.lp.print_stats()
+
             if scan_line.shape[1] > 0:
-                # Transfroma points from sonar to camera reference frame
-                # scan_line = np.matmul(self.Ts_c[:3,:3], scan_line.T).T + self.Ts_c[:3, 3]
                 # Apply DBSCAN
                 # Number of clusters (excluding noise if present)
                 num_clusters, cluster_labels = self.imaging_sonar.cluster_scanline(scan_line[:, 0:3])
@@ -199,9 +211,9 @@ class MergeFunctions:
                     # Take only the area that is segmented correctly in the binary image and target label image
                     area_image = cv2.bitwise_and(target_label, thresholded_image)
                     # Filter Out edges of Image
-                    area_image[-300:, :] = 0
-                    area_image[:, -300:] = 0
-                    area_image[:, 0:300] = 0
+                    area_image[-self.boundry:, :] = 0
+                    area_image[:, -self.boundry:] = 0
+                    area_image[:, 0:self.boundry] = 0
                     # Add area into final contact image
                     contact_image = cv2.bitwise_or(area_image, contact_image)
                     # Count number of contact pixels in the area
@@ -226,18 +238,17 @@ class MergeFunctions:
                             # Compute polar coordinates
                             r = np.sqrt((filtered_scan[:, 0])**2 + (filtered_scan[:, 1])**2)  # Radius
                             theta = np.arctan2(filtered_scan[:, 1], filtered_scan[:, 0])  # Angle in radians
-                            # polar_coordinates = np.column_stack((r, theta))
                             # Compute extended cartesian coordomates to include all elevation angles 
                             extended_coordinates = self.imaging_sonar.get_extended_coordinates(r, theta)
                             # Transfroma points from sonar to camera reference frame
-                            extended_coordinates = np.matmul(self.Ts_c[:3,:3], extended_coordinates.T).T + self.Ts_c[:3, 3]
+                            extended_coordinates = np.matmul(self.rotation, extended_coordinates.T).T + self.translation
 
                             # Get 2D coordinates
                             xyw = np.matmul(self.monocular_camera.K, extended_coordinates.T).T
-                            #xyw = np.matmul(P, xyzw.T).T
-                            xyw[:,0] = np.divide(xyw[:, 0], xyw[:, 2])
-                            xyw[:,1] = np.divide(xyw[:, 1], xyw[:, 2])
-                            xyw[:,2] = np.divide(xyw[:, 2], xyw[:, 2])
+                            #xyw[:,0] = np.divide(xyw[:, 0], xyw[:, 2])
+                            #xyw[:,1] = np.divide(xyw[:, 1], xyw[:, 2])
+                            #xyw[:,2] = np.divide(xyw[:, 2], xyw[:, 2])
+                            xyw[:, :2] /= xyw[:, 2:3]  # Vectorized division
                             xy = np.round(xyw)[:,0:2].astype(np.int32)
 
                             # Change 2D coordinates to pixel coordinates
@@ -323,7 +334,7 @@ class MergeFunctions:
             
                 if cloud_from_img is not None:
                     # Transfrom to Sonar frame
-                    xyz_cloud = np.matmul((cloud_from_img-self.Ts_c[:3, 3]), self.Ts_c[:3, :3])
+                    xyz_cloud = np.matmul((cloud_from_img-self.translation), self.rotation)
 
                     # Get translation
                     t = np.array([pose.position.x,pose.position.y,pose.position.z])# Centered on robot center
@@ -347,10 +358,8 @@ class MergeFunctions:
                         self.xyz_aggregated = sampled_cloud#np.row_stack((sampled_cloud, self.xyz_aggregated))
                     else:
                         self.xyz_aggregated = xyz_cloud
-
-                    np.save('project_2D_cloud.npy', self.xyz_aggregated)
-
-
+            
+            np.save('aggregated_cloud.npy', self.xyz_aggregated)
             return self.xyz_aggregated, depth_img_color, stamp, feature_image
         else:
             return np.zeros(0), np.zeros(0), np.zeros(0), np.zeros(0)

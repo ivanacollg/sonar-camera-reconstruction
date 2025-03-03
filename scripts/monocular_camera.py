@@ -4,6 +4,9 @@ import numpy as np
 # OpenCV
 import cv2
 
+cv2.setNumThreads(4)  # Adjust the number based on your CPU cores
+cv2.setUseOptimized(True)
+
 class MonocularCamera:
     """Class to handle operations related to a monocular camera, including preprocessing 
     and segmentation of images.

@@ -8,7 +8,10 @@ import cv2
 import open3d as o3d
 
 # Custom libaries
-from stereo_sonar.CFAR import *
+from CFAR import *
+
+cv2.setNumThreads(4)  # Adjust the number based on your CPU cores
+cv2.setUseOptimized(True)
 
 class ImagingSonar:
     """Class to handle operations related to an imaging sonar system.
@@ -28,7 +31,7 @@ class ImagingSonar:
         REVERSE_Z (int): Factor to adjust Z-axis direction.
     """
 
-    def __init__(self, sonar_range, detector_threshold, vertical_FOV):
+    def __init__(self, sonar_range, detector_threshold, vertical_FOV, sonar_features, fast_performance):
         """
         Initializes the ImagingSonar object.
 
@@ -36,10 +39,13 @@ class ImagingSonar:
             sonar_range (float): Maximum sonar detection range in meters.
             detector_threshold (float): Threshold value for sonar detection.
             vertical_FOV (float): Vertical field of view in degrees.
+            sonar_features (bool): Determines if we highlight sonar featues in image.
+            fast_performance (bool): Determines if fast or detaild parameters are used.
         """
         self.sonar_range = sonar_range
         self.detector_threshold = detector_threshold
         self.vertical_FOV = vertical_FOV
+        self.sonar_features = sonar_features
         # for remapping from polar to cartisian
         self.res = None
         self.height = None
@@ -51,6 +57,7 @@ class ImagingSonar:
         self.f_bearings = None
         self.to_rad = lambda bearing: bearing * np.pi / 18000
         self.REVERSE_Z = 1
+        self.fast_performance = fast_performance
 
     def init_CFAR(self, Ntc, Ngc, Pfa, rank):
         """
@@ -114,8 +121,7 @@ class ImagingSonar:
         r = np.sqrt(np.square(x) + np.square(y))
         self.map_y = np.asarray(r / self.res, dtype=np.float32)
         self.map_x = np.asarray(f_bearings(b), dtype=np.float32)
-        np.save("mapy", self.map_y)
-        np.save("mapx", self.map_x)
+
         # check for change in max range
         if self.sonar_range != self.height:
             self.sonar_range = self.height
@@ -132,11 +138,17 @@ class ImagingSonar:
         """
         # extract the first contact in each column 
         peaks_rot = np.rot90(peaks) # rotate the peaks to we can work with columns 
+        '''
         blank = np.zeros_like(peaks_rot) # make a blank image copy
         for i,col in enumerate(peaks_rot): # loop
             j = np.argmax(col)
             if peaks_rot[i][j] != 0:
                 blank[i][j] = 255
+        '''
+        idx = np.argmax(peaks_rot, axis=1)  # Get first nonzero pixel in each column
+        valid = peaks_rot[np.arange(len(peaks_rot)), idx] != 0  # Filter valid peaks
+        blank = np.zeros_like(peaks_rot)
+        blank[np.arange(len(peaks_rot))[valid], idx[valid]] = 255
         return np.rot90(blank,3)
 
     def get_sonar_scanline(self, sonar_msg):
@@ -160,7 +172,8 @@ class ImagingSonar:
             # generate the mapping from polar to cartisian
             self.generate_map_xy(sonar_msg)
             # denoise the horizontal image, consider adding this for the vertical image
-            sonar_img = cv2.fastNlMeansDenoising(sonar_img, None, 10, 7, 21)
+            if not self.fast_performance:
+                sonar_img = cv2.fastNlMeansDenoising(sonar_img, None, 10, 7, 21)
             # get some features using CFAR
             # Detect targets and check against threshold using CFAR (in polar coordinates)
             peaks = self.detector.detect(sonar_img, "SOCA")
@@ -170,8 +183,9 @@ class ImagingSonar:
 
             # create a vis image 
             feature_image = cv2.applyColorMap(sonar_img, 2)
-            for point in np.c_[np.nonzero(line_scan)]:
-                cv2.circle(feature_image,(point[1],point[0]),3,(0,0,255),-1)
+            if self.sonar_features:
+                for point in np.c_[np.nonzero(line_scan)]:
+                    cv2.circle(feature_image,(point[1],point[0]),3,(0,0,255),-1)
             feature_image = cv2.remap(feature_image, self.map_x, self.map_y, cv2.INTER_LINEAR)
 
             # extract the line scan
@@ -242,6 +256,8 @@ class ImagingSonar:
         Returns:
             numpy.ndarray: 3D points representing sonar scans.
         """
+        if self.fast_performance:
+            num_phi_samples = 100
         # Convert r_values and theta_values to NumPy arrays for vectorized operations
         r_values = np.asarray(r_values)[:, None, None]  # Shape (num_r, 1, 1)
         theta_values = np.asarray(theta_values)[None, :, None]  # Shape (1, num_theta, 1)
